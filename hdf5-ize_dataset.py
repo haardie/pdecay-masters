@@ -3,7 +3,7 @@ import os
 import h5py
 import shutil
 import numpy as np
-from PIL import Image
+import pandas as pd
 
 
 def traverse_dirs(root):
@@ -33,27 +33,29 @@ def traverse_dirs(root):
 
     return npz_dict
 
+def create_hdf5_struct_batched(npz_dict, hdf5_path, batch_size=20):
+    dt = np.dtype([
+        ('data', h5py.special_dtype(vlen=np.float32)),
+        ('indices', h5py.special_dtype(vlen=np.int32)),
+        ('indptr', h5py.special_dtype(vlen=np.int32)),
+        ('label', np.int8)
+    ])
 
-def create_hdf5_struct(npz_dict, hdf5_path):
     with h5py.File(hdf5_path, 'w') as hdf5_file:
         for plane, classes in npz_dict.items():
             for cls, files in classes.items():
-                class_group_path = f"{plane}/{cls}"
-                class_group = hdf5_file.create_group(class_group_path)
+                num_batches = len(files) // batch_size + (1 if len(files) % batch_size > 0 else 0)
+                for batch_num in range(num_batches):
+                    batch_files = files[batch_num * batch_size: (batch_num + 1) * batch_size]
+                    batch_data = []
 
-                labels_dataset = class_group.create_dataset("labels", (len(files),), dtype='i8', compression='gzip')
+                    for file_path in batch_files:
+                        csr_matrix = sp.load_npz(file_path)
+                        batch_data.append((csr_matrix.data, csr_matrix.indices, csr_matrix.indptr, 1 if cls == 'PDK' else 0))
 
-                # store components of a sparse matrix
-                for idx, file_path in enumerate(files):
-                    basename = os.path.splitext(os.path.basename(file_path))[0]
-                    csr_matrix = sp.load_npz(file_path)
-
-                    for component in ['data', 'indices', 'indptr']:
-                        component_data = getattr(csr_matrix, component)
-                        dataset_name = f"{basename}_{component}"
-                        class_group.create_dataset(dataset_name, data=component_data, compression='gzip')
-
-                    labels_dataset[idx] = 1 if cls == 'PDK' else 0
+                    struct_arr = np.array(batch_data, dtype=dt)
+                    batch_dataset_name = f"{plane}/{cls}/batch_{batch_num + 1}" 
+                    batch_dataset = hdf5_file.create_dataset(batch_dataset_name, data=struct_arr, compression='gzip')
 
 
 def create_dummy_data(root_dir):
@@ -82,35 +84,27 @@ def cleanup_data(root_dir):
     if os.path.exists(root_dir):
         shutil.rmtree(root_dir)
 
+def convert_batch_to_dataframe(hdf5_path, dataset_path):
+    # Open the HDF5 file
+    with h5py.File(hdf5_path, 'r') as hdf:
+        if dataset_path in hdf:
+            dataset = hdf[dataset_path]
+            data = dataset[:]
+            df = pd.DataFrame(data)
+            df['data'] = df['data'].apply(np.array)
+            df['indices'] = df['indices'].apply(np.array)
+            df['indptr'] = df['indptr'].apply(np.array)
+
+            return df
+        else:
+            print("Dataset not found in the file.")
+            return None
+
 
 if __name__ == '__main__':
 
     dummy_root = '/Users/hardie/dummy-npz-dataset/'
     # create_dummy_data(dummy_root)
 
-    create_hdf5_struct(traverse_dirs(dummy_root), 'dummy.hdf5')
-
-    # with h5py.File('dummy.hdf5', 'r') as hdf:
-    #     def print_details(name, obj):
-    #         if isinstance(obj, h5py.Dataset):
-    #             print(f"Dataset (=file): {name}")
-    #             print(f"Shape: {obj.shape}, Type: {obj.dtype}")
-    #             # print("Data:", obj[:])
-    #         else:
-    #             print(f"Group (=folder): {name}")
-    #
-    #     hdf.visititems(print_details)
-
-    # example matrix reconstruction & plotting
-    with h5py.File('dummy.hdf5', 'r') as hdf5_file:
-        # Load the sparse matrix
-        csr_matrix = load_sparse_matrix(hdf5_file, 'plane0/AtmoNu', 'files_AtmoNu_0_dummy_plane0_0')
-        dense = csr_matrix.todense()
-        min = dense.min()
-        max = dense.max()
-        norm_matrix = (dense - min) / (max - min) * 255
-        norm_matrix = norm_matrix.astype(np.uint8)
-        img = Image.fromarray(norm_matrix)
-        img.show()
-        
+    create_hdf5_struct_batched(traverse_dirs(dummy_root), 'dummy_batched.hdf5')
     # cleanup_data(dummy_root)
