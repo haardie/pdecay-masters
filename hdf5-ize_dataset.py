@@ -57,7 +57,6 @@ def coo_to_torch(hdf5_path, image_key):
             indices = torch.LongTensor([nz_x, nz_y])
             rows, cols = max(nz_x) + 1, max(nz_y) + 1
             sp_tensor = torch.sparse_coo_tensor(indices, values, torch.Size([rows, cols]))
-
             return sp_tensor
 
 
