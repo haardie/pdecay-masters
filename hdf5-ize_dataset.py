@@ -29,41 +29,36 @@ def get_meta(branch):
 def find_max_intensity_patch(arr, out_shape):
     int_img = np.cumsum(np.cumsum(arr, axis=0), axis=1)
 
-    frame_sums = np.zeros((arr.shape[0] - out_shape[0] + 1, arr.shape[1] - out_shape[1] + 1))
-    for i in range(frame_sums.shape[0]):
-        for j in range(frame_sums.shape[1]):
-            total = int_img[i + out_shape[0] - 1, j + out_shape[1] - 1]
-            total -= int_img[i + out_shape[0] - 1, j - 1] if j > 0 else 0
-            total -= int_img[i - 1, j + out_shape[1] - 1] if i > 0 else 0
-            total += int_img[i - 1, j - 1] if (i > 0 and j > 0) else 0
-            frame_sums[i, j] = total
+    sum_patches = int_img[out_shape[0] - 1:, out_shape[1] - 1:] - \
+                  np.pad(int_img[out_shape[0] - 1:, :-out_shape[1]], ((0, 0), (1, 0)), 'constant', constant_values=0) - \
+                  np.pad(int_img[:-out_shape[0], out_shape[1] - 1:], ((1, 0), (0, 0)), 'constant', constant_values=0) + \
+                  np.pad(int_img[:-out_shape[0], :-out_shape[1]], ((1, 0), (1, 0)), 'constant', constant_values=0)
 
-    max_pos = np.unravel_index(np.argmax(frame_sums), frame_sums.shape)
-    max_int_patch = arr[max_pos[0]:max_pos[0] + out_shape[0],
-                        max_pos[1]:max_pos[1] + out_shape[1]]
+    max_pos = np.unravel_index(np.argmax(sum_patches), sum_patches.shape)
 
-    return max_int_patch
+    return arr[max_pos[0]:max_pos[0] + out_shape[0], max_pos[1]:max_pos[1] + out_shape[1]]
 
 
 def center_nz_pattern(patch, out_shape):
-    nz_indices = np.transpose(np.nonzero(patch))
-    if nz_indices.size == 0:
+    nz_x, nz_y = np.nonzero(patch)
+    if not nz_x.size:
         return np.zeros(out_shape)
 
-    # new nz indices shifted to geometric center of the 'image'
-    cindices = nz_indices - np.mean(nz_indices, axis=0).astype(int) + np.array(out_shape) // 2
+    # center nz indices around the geometric center of the out_shape
+    meanx = np.mean(nz_x).astype(int)
+    meany = np.mean(nz_y).astype(int)
+
+    centx = nz_x - meanx + out_shape[1] // 2
+    centy = nz_y - meany + out_shape[0] // 2
+
+    # filter out indices that fall outside the out_shape dimensions
+    valid_mask = (centx >= 0) & (centx < out_shape[0]) & (centy >= 0) & (centy < out_shape[1])
+    valid_x = centx[valid_mask]
+    valid_y = centy[valid_mask]
+    valid_values = patch[nz_x[valid_mask], nz_y[valid_mask]]
+
     cpatch = np.zeros(out_shape)
-
-    # to filter out nz indices outside out_shape
-    valid_indices = (cindices[:, 0] >= 0) & (cindices[:, 0] < out_shape[0]) & \
-                    (cindices[:, 1] >= 0) & (cindices[:, 1] < out_shape[1])
-
-    cindices = cindices[valid_indices]
-    nz_values = patch[np.nonzero(patch)]
-    nz_values = nz_values[valid_indices]
-
-    cpatch[cindices[:, 0], cindices[:, 1]] = nz_values
-
+    cpatch[valid_y, valid_x] = valid_values
     return cpatch
 
 
@@ -84,8 +79,11 @@ def get_comp_from_root(rootf, prec, next_):
     for plane_idx in range(3):
         mdata = ak.to_numpy(linear_data[plane_idx]).reshape(col_count[plane_idx], row_count[plane_idx])
         mdata[mdata < 0] = 0
-        max_int_patch = find_max_intensity_patch(mdata, (800, 200))
-        cmdata = center_nz_pattern(max_int_patch, (800, 800))
+
+        # === ROI extraction ===
+        max_int_patch = find_max_intensity_patch(mdata, (1000, 200))
+        cmdata = center_nz_pattern(max_int_patch, (1000, 1000))
+        # ======================
 
         nz_indices = np.transpose(np.nonzero(cmdata))
         nz_x, nz_y = nz_indices[:, 0], nz_indices[:, 1]
