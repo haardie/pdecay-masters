@@ -131,6 +131,9 @@ def create_hdf5_from_root(rootf_path, hdf5_path, batch_size):
 
 
 if __name__ == '__main__':
-    rootf_path = '/Users/hardie/research/ROOT/protondecay_hA_BodekRitchie_dune10kt_1x2x6_54474279_179_20220423T063923Z_gen_g4_detsim_reco_65804491_0_20230126T175412Z_reReco_larcv.root'
-    hdf5_path = '/Users/hardie/sample_root.hdf5'
+    import sys
+    rootf_path = sys.argv[1]
+    #'/Users/hardie/research/ROOT/protondecay_hA_BodekRitchie_dune10kt_1x2x6_54474279_179_20220423T063923Z_gen_g4_detsim_reco_65804491_0_20230126T175412Z_reReco_larcv.root'
+    hdf5_path = sys.argv[2]
+    #'/Users/hardie/sample_root.hdf5'
     create_hdf5_from_root(rootf_path, hdf5_path, batch_size=64)
