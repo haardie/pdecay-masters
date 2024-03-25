@@ -97,7 +97,7 @@ def get_comp_from_root(rootf, prec, next_):
     return nz_indices_evt, nz_values_evt
 
 
-def create_hdf5_from_root(rootf_path, hdf5_path, batch_size):
+def create_hdf5_from_root(rootf_path, hdf5_path, batch_size, nevents=-1):
     dtype = np.dtype([
         ('nz_x', np.uint32),
         ('nz_y', np.uint32),
@@ -106,6 +106,8 @@ def create_hdf5_from_root(rootf_path, hdf5_path, batch_size):
     with ur.open(rootf_path) as rootf:
         tree = rootf['image2d_tpc_tree']
         entries = tree.num_entries
+        if nevents > -1 :
+            entries = nevents
         num_batches = entries // batch_size + (1 if entries % batch_size > 0 else 0)
 
         with h5py.File(hdf5_path, 'w') as hdf5_file:
@@ -135,5 +137,8 @@ if __name__ == '__main__':
     rootf_path = sys.argv[1]
     #'/Users/hardie/research/ROOT/protondecay_hA_BodekRitchie_dune10kt_1x2x6_54474279_179_20220423T063923Z_gen_g4_detsim_reco_65804491_0_20230126T175412Z_reReco_larcv.root'
     hdf5_path = sys.argv[2]
+    nevts=-1
+    if len(sys.argv) > 3 :
+        nevts=int(sys.argv[3])
     #'/Users/hardie/sample_root.hdf5'
-    create_hdf5_from_root(rootf_path, hdf5_path, batch_size=64)
+    create_hdf5_from_root(rootf_path, hdf5_path, batch_size=64, nevents=nevts)
