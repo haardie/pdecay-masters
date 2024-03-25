@@ -126,7 +126,7 @@ def create_hdf5_from_root(rootf_path, hdf5_path, batch_size, nevents=-1):
                         nz_values = nz_values_evt[str(plane_idx)]
                         components = np.array(list(zip(nz_x, nz_y, nz_values)), dtype=dtype)
 
-                        dset_name = f"evt{evt_idx + 1}/plane{plane_idx}"
+                        dset_name = f"plane{plane_idx}"
 
                         event_group.create_dataset(dset_name, data=components, chunks=True, compression_opts=1,
                                                    compression='gzip')
