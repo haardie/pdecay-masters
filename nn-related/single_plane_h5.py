@@ -18,7 +18,7 @@ if len(sys.argv) != 5:
 
 cfg_path, sig_dir, bkg_dir, data_dir = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 sys.path.append('./src')
-from src import fns_helios_simplified as fns
+from src import fns as fns
 from src import cls as cls
 
 
