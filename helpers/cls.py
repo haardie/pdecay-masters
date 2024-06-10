@@ -8,6 +8,7 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, models
 import torch.nn.functional as F
 import h5py
+import weave
 
 
 class ModifiedEfficientNet(nn.Module):
@@ -33,8 +34,6 @@ class SparseMatrixDataset(Dataset):
         self.transform = transforms.Compose([
             transforms.Resize((500, 500)),
             transforms.ToTensor()
-            # transforms.Normalize(mean=[0.0035], std=[0.85])  # The normalization values are calculated from the
-            # training set
         ])
 
     def __len__(self):
@@ -155,8 +154,49 @@ class LateFusedModel(nn.Module):
     def forward(self, inputs_plane0_pos, inputs_plane1_pos, inputs_plane2_pos,
                 inputs_plane0_neg, inputs_plane1_neg, inputs_plane2_neg, drop_enabled=False):
 
-        inputs_list = [inputs_plane0_pos.to(self.device), inputs_plane1_pos.to(self.device), inputs_plane2_pos.to(self.device),
-                       inputs_plane0_neg.to(self.device), inputs_plane1_neg.to(self.device), inputs_plane2_neg.to(self.device)]
+        inputs_list = [inputs_plane0_pos.to(self.device), inputs_plane1_pos.to(self.device),
+                       inputs_plane2_pos.to(self.device),
+                       inputs_plane0_neg.to(self.device), inputs_plane1_neg.to(self.device),
+                       inputs_plane2_neg.to(self.device)]
+
+        outputs = [model(input) for model, input in zip(self.models, inputs_list)]
+
+        for i in range(len(outputs)):
+            outputs[i] = outputs[i].view(outputs[i].size(0), -1)
+
+        fused_output = torch.cat(outputs, dim=1)
+        gated_output = self.gated_fusion(fused_output)
+
+        if drop_enabled:
+            gated_output = F.dropout(gated_output, p=0.3, training=True)
+        output = self.classifier(gated_output)
+
+        return output
+
+
+class LateFusedModel3(nn.Module):
+    def __init__(self, models, device='cuda'):
+        super(LateFusedModel3, self).__init__()
+        self.device = device
+        self.models = nn.ModuleList(models)
+
+        for i in range(len(self.models)):
+            self.models[i] = nn.Sequential(*list(self.models[i].children())[:-1])
+
+        for model in self.models:
+            for param in model.parameters():
+                param.requires_grad = False
+
+        self.input_dim = 512 * len(models)
+        self.gating_dim = 512
+
+        self.gated_fusion = GatedFusion(self.input_dim, self.gating_dim)
+        self.classifier = nn.Linear(self.input_dim, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, inputs_plane0, inputs_plane1, inputs_plane2, drop_enabled=False):
+
+        inputs_list = [inputs_plane0.to(self.device), inputs_plane1.to(self.device), inputs_plane2.to(self.device)]
 
         outputs = [model(input) for model, input in zip(self.models, inputs_list)]
 
@@ -174,45 +214,73 @@ class LateFusedModel(nn.Module):
 
 
 class HDF5SparseDataset(Dataset):
-    def __init__(self, file_path, plane_idx):
-
-        self.file_path = file_path
+    @weave.op()
+    def __init__(self, signal_files, background_files, plane_idx):
+        self.signal_files = signal_files
+        self.background_files = background_files
         self.plane_idx = plane_idx
         self.keys = []
         self.labels = []
 
-        if "PDK" in file_path:
-            self.label = 1
-        elif "AtmoNu" in file_path:
-            self.label = 0
-        else:
-            raise ValueError("Filename does not specify valid class type")
+        signal_count = self._load_keys(self.signal_files, label=1)
+        background_count = self._load_keys(self.background_files, label=0)
 
-        with h5py.File(self.file_path, 'r') as f:
-            # 'batchX/evtY/planeZ'
-            for batch in f.keys():
-                for evt in f[batch].keys():
-                    if f'{batch}/{evt}/plane{self.plane_idx}' in f:
-                        self.keys.append(f'{batch}/{evt}/plane{self.plane_idx}')
-                        self.labels.append(self.label)
+        if background_count > 0:
+            ratio = signal_count / background_count
+            print(f"Signal-to-Background Ratio: {ratio:.2f}")
+        else:
+            print("No background samples found.")
+
+    @weave.op()
+    def _load_keys(self, files, label):
+        count = 0
+        for file_path in files:
+            with h5py.File(file_path, 'r') as f:
+                for batch in f.keys():
+                    for evt in f[batch].keys():
+                        if f'{batch}/{evt}/plane{self.plane_idx}' in f:
+                            self.keys.append((file_path, f'{batch}/{evt}/plane{self.plane_idx}'))
+                            self.labels.append(label)
+                            count += 1
+        return count
 
     def __len__(self):
         return len(self.keys)
 
+    @weave.op()
     def __getitem__(self, idx):
-        with h5py.File(self.file_path, 'r') as f:
-            data = np.array(f[self.keys[idx]])
+        file_path, key = self.keys[idx]
+        with h5py.File(file_path, 'r') as f:
+            data2d = np.zeros((1000, 1000))
+            data = np.array(f[key])
+            for entry in data:
+                x, y, value = entry
+                data2d[x, y] = value
 
-        indices = torch.LongTensor(data[:, :2].T)
-        values = torch.FloatTensor(data[:, 2])
-        shape = torch.max(indices, dim=1).values + 1
-        sparse_tensor = torch.sparse_coo_tensor(indices, values, torch.Size(shape))
+        data2d = np.expand_dims(data2d, axis=0)  # Shape: (1, 1000, 1000)
+        tensor = torch.tensor(data2d, dtype=torch.float32)
         label = self.labels[idx]
-        return sparse_tensor, label
+        return tensor, label
 
 
-def create_dataloader(file_path, plane_idx, batch_size, shuffle=True):
-    dataset = HDF5SparseDataset(file_path, plane_idx)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=shuffle)
-    return loader
+@weave.op()
+def create_dataloader(dataset, target_batch_size, shuffle, nworkers):
+    initial_batch_size = 64
 
+    if target_batch_size % initial_batch_size != 0:
+        raise ValueError("Target batch size must be a multiple of initial batch size")
+
+    loader = DataLoader(dataset, batch_size=initial_batch_size, shuffle=shuffle, num_workers=nworkers, pin_memory=True)
+
+    combined_batches = []
+    batch_list = []
+
+    for i, (data, label) in enumerate(loader):
+        combined_batches.append((data, label))
+        if (i + 1) % (target_batch_size // initial_batch_size) == 0:
+            combined_data = torch.cat([batch[0] for batch in combined_batches])
+            combined_labels = torch.cat([batch[1] for batch in combined_batches])
+            batch_list.append((combined_data, combined_labels))
+            combined_batches = []
+
+    return batch_list
