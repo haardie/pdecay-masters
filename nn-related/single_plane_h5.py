@@ -46,8 +46,8 @@ epochs = cfg['training']['num_epochs']
 pat = cfg['training']['patience']
 
 sgn = "pos"
-sig_files = [os.path.join(sig_dir, f) for f in os.listdir(sig_dir) if f.endswith('.h5')][:3]
-bkg_files = [os.path.join(bkg_dir, f) for f in os.listdir(bkg_dir) if f.endswith('.h5')][:3]
+sig_files = [os.path.join(sig_dir, f) for f in os.listdir(sig_dir) if f.endswith('.h5')]
+bkg_files = [os.path.join(bkg_dir, f) for f in os.listdir(bkg_dir) if f.endswith('.h5')]
 
 print("Signal HDF5 Files:")
 for f in sig_files:
