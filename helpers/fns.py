@@ -15,6 +15,12 @@ sys.path.append('./src')
 sys.path.append('./src/net_cfg.json')
 sys.path.append('./src/cls.py')
 
+# ===================== #
+# ==== LOAD CONFIG ==== #
+# ===================== #
+
+sys.path.append('/mnt/lustre/helios-home/gartmann/venv/src/net_cfg.json')
+
 with open("/mnt/lustre/helios-home/gartmann/venv/src/net_cfg.json", "r") as cfg:
     config = json.load(cfg)
 
@@ -60,7 +66,7 @@ def load_checkpoint(model, checkpoint_path):
     if unexpected_keys:
         print(f"Unexpected keys in state_dict: {unexpected_keys}")
 
-    model.load_state_dict(checkpoint_state_dict, strict=True) 
+    model.load_state_dict(checkpoint_state_dict, strict=False)  # strict=False to ignore missing and unexpected keys
 
 
 @weave.op()
@@ -235,7 +241,7 @@ def train_one_epoch(epoch_idx, model, train_loader, optimizer, criterion, device
 
     epoch_loss = running_loss / len(train_loader)
     acc = correct / total
-    scheduler.step() 
+    scheduler.step()
 
     wandb.log({f"train_acc": acc, f"train_loss": epoch_loss})
     print(f'Epoch: {epoch_idx} | Loss: {epoch_loss:.4f} | Accuracy: {acc:.4f}')
@@ -254,7 +260,7 @@ def validate(model, val_loader, criterion, device, table, df, epoch_idx, is_best
     all_labels = []
     temp_val_data = []
 
-    model.eval() 
+    model.eval()
     with torch.no_grad():
         for inputs, labels in val_loader:
             inputs, labels = inputs.to(device), labels.unsqueeze(1).float().to(device)
@@ -296,7 +302,7 @@ def validate(model, val_loader, criterion, device, table, df, epoch_idx, is_best
 
 
 @weave.op()
-def test_model(model, sgn, plane, checkpoint_pth, test_loader, device, df, test_table):
+def test_model(model, plane, checkpoint_pth, test_loader, device, df, test_table):
     temp_test_data = []
     all_responses = []
     all_labels = []
@@ -321,12 +327,12 @@ def test_model(model, sgn, plane, checkpoint_pth, test_loader, device, df, test_
     df = pd.concat([df, tempdf], ignore_index=True)
 
     date_time = time.strftime('%d-%m_%H-%M')
-    df.to_csv(f'./diagnostics/metrics-df/df_test_{date_time}_resnet18_{sgn}_plane{plane}.csv')
+    df.to_csv(f'./diagnostics/metrics-df/df_test_{date_time}_resnet18_h5_plane{plane}.csv')
 
 
 @weave.op()
 def train_model(model, train_loader, optimizer, criterion, scheduler, val_loader, device, num_epochs, patience, table,
-                val_table, df_train, df_val, plane, sgn):
+                val_table, df_train, df_val, plane):
     train_loss_values = []
     val_loss_values = []
 
@@ -338,7 +344,7 @@ def train_model(model, train_loader, optimizer, criterion, scheduler, val_loader
     f1_vals = []
 
     best_loss = np.inf
-    best_model_wts = deepcopy(model.state_dict()) 
+    best_model_wts = deepcopy(model.state_dict())
     no_improvement_epochs = 0
 
     best_epoch = None
@@ -373,13 +379,15 @@ def train_model(model, train_loader, optimizer, criterion, scheduler, val_loader
 
     if best_epoch is not None:
         model.load_state_dict(best_model_wts)
-        
+
+        # Re-run training and validation for the best epoch to log the metrics
         _, _, df_train = train_one_epoch(best_epoch, model, train_loader, optimizer, criterion, device,
                                          scheduler, table, df_train, True)
         _, _, _, _, _, df_val = validate(model, val_loader, criterion, device, val_table, df_val, best_epoch, True)
 
-    save_path = '/mnt/lustre/helios-home/gartmann/venv/checkpoints/resnet18-{}/resnet18_{}_{}_{}.pt'.format(
-        sgn, time.strftime('%d-%m_%H-%M'), sgn, plane)
+    # Save checkpoint
+    save_path = '/mnt/lustre/helios-home/gartmann/venv/checkpoints/resnet18_{}_{}.pt'.format(
+        time.strftime('%d-%m_%H-%M'), plane)
 
     torch.save({'model_state_dict': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict()}, save_path)
     print('Checkpoint saved at {}'.format(save_path))
@@ -388,7 +396,9 @@ def train_model(model, train_loader, optimizer, criterion, scheduler, val_loader
     wandb.log({f"train_table_{date_time}": table})
     wandb.log({f"val_table_{date_time}": val_table})
 
-    df_train.to_csv(f'./diagnostics/metrics-df/df_train_{date_time}_resnet18_{sgn}_plane{plane}.csv')
-    df_val.to_csv(f'./diagnostics/metrics-df/df_val_{date_time}_resnet18_{sgn}_plane{plane}.csv')
 
-    return model, train_loss_values, val_loss_values, train_acc_values, val_acc_values, precision_vals, recall_vals, f1_vals, best_epoch
+    df_train.to_csv(f'./diagnostics/metrics-df/df_train_{date_time}_resnet18_h5_plane{plane}.csv')
+    df_val.to_csv(f'./diagnostics/metrics-df/df_val_{date_time}_resnet18_h5_plane{plane}.csv')
+
+    results = [model, train_loss_values, val_loss_values, train_acc_values, val_acc_values, precision_vals, recall_vals, f1_vals, best_epoch]
+    return results
