@@ -9,7 +9,8 @@ from torchvision import transforms, models
 import torch.nn.functional as F
 import h5py
 import weave
-
+from functools import lru_cache
+import multiprocessing as mp
 
 class ModifiedEfficientNet(nn.Module):
     def __init__(self, dropout, device, num_classes=1):
@@ -34,6 +35,8 @@ class SparseMatrixDataset(Dataset):
         self.transform = transforms.Compose([
             transforms.Resize((500, 500)),
             transforms.ToTensor()
+            # transforms.Normalize(mean=[0.0035], std=[0.85])  # The normalization values are calculated from the
+            # training set
         ])
 
     def __len__(self):
@@ -83,7 +86,7 @@ class EarlyFusionDataset(Dataset):
 
 
 class ModifiedResNet(nn.Module):
-    def __init__(self, device='cpu', num_classes=1):
+    def __init__(self, device='cuda', num_classes=1):
         super(ModifiedResNet, self).__init__()
         self.device = device
         self.model = models.resnet18()
@@ -219,11 +222,35 @@ class HDF5SparseDataset(Dataset):
         self.signal_files = signal_files
         self.background_files = background_files
         self.plane_idx = plane_idx
+   
         self.keys = []
         self.labels = []
 
-        signal_count = self._load_keys(self.signal_files, label=1)
-        background_count = self._load_keys(self.background_files, label=0)
+        self._load_data_multiprocess(signal_files, background_files)
+        # self.mean, self.std = self._compute_mean_std_parallel()
+
+        self.transform = transforms.Compose([
+        transforms.Resize(500),
+        transforms.Normalize(mean=[20.19365526422530], std=[32.858101401293254])
+        ])
+
+    @weave.op()
+    def _load_data_multiprocess(self, signal_files, background_files):
+        print(f"Using {mp.cpu_count()} CPUs.")
+        with mp.Pool(processes=mp.cpu_count()) as pool:
+            signal_results = pool.map(self._process_file, [(file, 1, self.plane_idx) for file in signal_files])
+            background_results = pool.map(self._process_file, [(file, 0, self.plane_idx) for file in background_files])
+
+        signal_count = sum(len(result[0]) for result in signal_results)
+        background_count = sum(len(result[0]) for result in background_results)
+
+        for result in signal_results:
+            self.keys.extend(result[0])
+            self.labels.extend(result[1])
+
+        for result in background_results:
+            self.keys.extend(result[0])
+            self.labels.extend(result[1])
 
         if background_count > 0:
             ratio = signal_count / background_count
@@ -231,56 +258,76 @@ class HDF5SparseDataset(Dataset):
         else:
             print("No background samples found.")
 
-    @weave.op()
-    def _load_keys(self, files, label):
-        count = 0
-        for file_path in files:
-            with h5py.File(file_path, 'r') as f:
-                for batch in f.keys():
-                    for evt in f[batch].keys():
-                        if f'{batch}/{evt}/plane{self.plane_idx}' in f:
-                            self.keys.append((file_path, f'{batch}/{evt}/plane{self.plane_idx}'))
-                            self.labels.append(label)
-                            count += 1
-        return count
+    @staticmethod
+    def _process_file(args):
+        file_path, label, plane_idx = args
+        keys = []
+        labels = []
+        with h5py.File(file_path, 'r') as f:
+            for batch in f.keys():
+                for evt in f[batch].keys():
+                    key_path = f'{batch}/{evt}/plane{plane_idx}'
+                    if key_path in f:
+                        keys.append((file_path, key_path))
+                        labels.append(label)
+        return keys, labels
+    
+    ##========================================================
+    ## ======== COMMENT OUT TO COMPUTE ON NEW DATASET ========
+    # @weave.op()
+    # def _compute_mean_std_parallel(self):
+    #     num_processes = mp.cpu_count()  # Use all available CPUs
+    #     chunk_size = len(self.keys) // num_processes
+
+    #     chunks = [self.keys[i:i + chunk_size] for i in range(0, len(self.keys), chunk_size)]
+
+    #     with mp.Pool(processes=num_processes) as pool:
+    #         results = pool.map(self._process_chunk, chunks)
+
+    #     total_sum = np.sum(result[0] for result in results)
+    #     total_sum_of_squares = np.sum(result[1] for result in results)
+    #     num_samples = np.sum(result[2] for result in results)
+
+    #     mean = total_sum / num_samples
+    #     std = np.sqrt(total_sum_of_squares / num_samples - mean ** 2)
+
+    #     print(f"Computed mean: {mean}, std: {std}")
+    #     return mean, std
+
+    #========================================================
+    # @staticmethod
+    # def _process_chunk(chunk):
+    #     total_sum = 0
+    #     total_sum_of_squares = 0
+    #     num_samples = 0
+
+    #     for file_path, key in chunk:
+    #         with h5py.File(file_path, 'r') as f:
+    #             data = np.array(f[key])
+    #             for entry in data:
+    #                 x, y, value = entry
+    #                 total_sum += value
+    #                 total_sum_of_squares += value ** 2
+    #                 num_samples += 1
+
+    #     return total_sum, total_sum_of_squares, num_samples
+    #========================================================
 
     def __len__(self):
         return len(self.keys)
 
-    @weave.op()
     def __getitem__(self, idx):
         file_path, key = self.keys[idx]
+        data2d = np.zeros((1000, 1000))
+
         with h5py.File(file_path, 'r') as f:
-            data2d = np.zeros((1000, 1000))
             data = np.array(f[key])
             for entry in data:
                 x, y, value = entry
                 data2d[x, y] = value
 
-        data2d = np.expand_dims(data2d, axis=0)  # Shape: (1, 1000, 1000)
+        data2d = np.expand_dims(data2d, axis=0)
         tensor = torch.tensor(data2d, dtype=torch.float32)
+        tensor = self.transform(tensor)
         label = self.labels[idx]
         return tensor, label
-
-
-@weave.op()
-def create_dataloader(dataset, target_batch_size, shuffle, nworkers):
-    initial_batch_size = 64
-
-    if target_batch_size % initial_batch_size != 0:
-        raise ValueError("Target batch size must be a multiple of initial batch size")
-
-    loader = DataLoader(dataset, batch_size=initial_batch_size, shuffle=shuffle, num_workers=nworkers, pin_memory=True)
-
-    combined_batches = []
-    batch_list = []
-
-    for i, (data, label) in enumerate(loader):
-        combined_batches.append((data, label))
-        if (i + 1) % (target_batch_size // initial_batch_size) == 0:
-            combined_data = torch.cat([batch[0] for batch in combined_batches])
-            combined_labels = torch.cat([batch[1] for batch in combined_batches])
-            batch_list.append((combined_data, combined_labels))
-            combined_batches = []
-
-    return batch_list
