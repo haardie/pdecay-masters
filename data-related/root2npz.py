@@ -143,23 +143,22 @@ def root2npz(rootf_path, loggy, output_dir='.'):
                     loggy.info(f'File already exists: {output_path}. Skipping...')
 
 
-def main(src, dest):
+def main_(src, dest):
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     loggy = logging.getLogger('root2npz')
+    loggy.info(f'Source directory: {src}')
+    loggy.info(f'Destination directory: {dest}')
 
-    for num_subdir in [sub for sub in os.listdir(src) if sub.isdigit()]:
-        num_subdir_path = os.path.join(src, num_subdir)
-        loggy.info(f'Checking numeric subdir: {num_subdir_path}')
-
-        for root_file in [file for file in os.listdir(num_subdir_path) if file.endswith('.root')]:
-            loggy.info(f'Processing ROOT file: {root_file}')
-            root2npz(os.path.join(num_subdir_path, root_file), loggy, dest)
+    for root_file in [file for file in os.listdir(src) if file.endswith('.root')]:
+        loggy.info(f'Processing ROOT file: {root_file}')
+        root2npz(os.path.join(src, root_file), loggy, dest)
 
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Convert ROOT files to NPZ files.')
-    parser.add_argument('src', type=str, help='The source directory containing ROOT files.')
-    parser.add_argument('dest', type=str, help='The destination directory to save NPZ files.')
-    args = parser.parse_args()
+#---------------------------------------------- MAIN ---------------------------------------------- #
 
-    main(args.src, args.dest)
+parser = argparse.ArgumentParser(description='Convert ROOT files to NPZ files.')
+parser.add_argument('src', type=str, help='The source directory containing ROOT files.')
+parser.add_argument('dest', type=str, help='The destination directory to save NPZ files.')
+args = parser.parse_args()
+
+main_(args.src, args.dest)
