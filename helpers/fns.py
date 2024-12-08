@@ -9,44 +9,212 @@ import pandas as pd
 import torch
 import wandb
 from torch.utils.data import random_split
+from torch.utils.data import Subset
 from sklearn.metrics import f1_score, precision_score, recall_score, accuracy_score
+from sklearn.model_selection import StratifiedShuffleSplit
+import logging
+import sklearn
+import multiprocessing as mp
+import matplotlib.pyplot as plt
+import seaborn as sns
+import random
+from collections import Counter
+import concurrent.futures
 
-sys.path.append('./src')
-sys.path.append('./src/net_cfg.json')
-sys.path.append('./src/cls.py')
+# ==================================#
+# == SET UP LOGGING CONFIGURATION ==#
+# ==================================#
+
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
+)
+loggy = logging.getLogger(__name__)
+
+sys.path.append("./src")
+sys.path.append("./src/net_cfg.json")
+sys.path.append("./src/cls.py")
 
 # ===================== #
 # ==== LOAD CONFIG ==== #
 # ===================== #
 
-sys.path.append('/mnt/lustre/helios-home/gartmann/venv/src/net_cfg.json')
+sys.path.append("/mnt/lustre/helios-home/gartmann/venv/src/net_cfg.json")
+# sys.path.append('/mnt/nfs19/gartman/code/helpers/net_cfg.json')
 
 with open("/mnt/lustre/helios-home/gartmann/venv/src/net_cfg.json", "r") as cfg:
     config = json.load(cfg)
+
+
+# def get_event_dirs(base_dir):
+#     event_dirs = []
+#     print(f"The base dir is {base_dir}, len: {len(os.listdir(base_dir))}")
+#     # for atmonu only some of the batches
+#     if "atmonu" in base_dir:
+#         batch_to_take = random.sample(
+#             os.listdir(base_dir), int(0.3 * len(os.listdir(base_dir)))
+#         )
+#         print(
+#             f"Taking {len(batch_to_take)} out of {len(os.listdir(base_dir))} batches for atmonu."
+#         )
+#         print(f"Taking batches: {batch_to_take}")
+#         for batch_dir in batch_to_take:
+#             batch_path = os.path.join(base_dir, batch_dir)
+#             if os.path.isdir(batch_path):
+#                 for evt in os.listdir(batch_path):
+#                     evt_path = os.path.join(batch_path, evt)
+#                     if os.path.isdir(evt_path):
+#                         event_dirs.append(evt_path)
+#         return event_dirs
+
+#     elif "pdk" in base_dir:
+#         print(f"Taking {len(os.listdir(base_dir))} batches for pdk.")
+#         for batch_dir in os.listdir(base_dir)[:32]:
+#             batch_path = os.path.join(base_dir, batch_dir)
+#             if os.path.isdir(batch_path):
+#                 for evt in os.listdir(batch_path):
+#                     evt_path = os.path.join(batch_path, evt)
+#                     if os.path.isdir(evt_path):
+#                         event_dirs.append(evt_path)
+#     else:
+#         print("No such dataset.")
+
+#     return event_dirs
+
+
+def get_event_dirs(base_dir):
+    event_dirs = []
+    print(f"The base dir is {base_dir}, len: {len(os.listdir(base_dir))}")
+
+    if "atmonu" in base_dir:
+        all_batches = os.listdir(base_dir)
+        batch_to_take = random.sample(all_batches, int(0.05 * len(all_batches)))
+
+        print(
+            f"Taking {len(batch_to_take)} out of {len(all_batches)} batches for atmonu."
+        )
+        print(f"Taking batches: {batch_to_take}")
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            # Process each batch in parallel
+            futures = [
+                executor.submit(
+                    _get_event_dirs_from_batch, os.path.join(base_dir, batch_dir)
+                )
+                for batch_dir in batch_to_take
+                if os.path.isdir(os.path.join(base_dir, batch_dir))
+            ]
+
+            for future in concurrent.futures.as_completed(futures):
+                event_dirs.extend(future.result())
+
+    elif "pdk" in base_dir:
+        all_batches = os.listdir(base_dir)[:20]
+        print(f"Taking {len(all_batches)} batches for pdk.")
+
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = [
+                executor.submit(
+                    _get_event_dirs_from_batch, os.path.join(base_dir, batch_dir)
+                )
+                for batch_dir in all_batches
+                if os.path.isdir(os.path.join(base_dir, batch_dir))
+            ]
+
+            for future in concurrent.futures.as_completed(futures):
+                event_dirs.extend(future.result())
+    else:
+        print("No such dataset.")
+
+    return event_dirs
+
+
+def _get_event_dirs_from_batch(batch_path):
+    event_dirs = []
+    for evt in os.listdir(batch_path):
+        evt_path = os.path.join(batch_path, evt)
+        if os.path.isdir(evt_path):
+            event_dirs.append(evt_path)
+    return event_dirs
 
 
 def split_dset(dataset, train_frac, val_frac, generator_seed):
     train_len = int(len(dataset) * train_frac)
     val_len = int(len(dataset) * val_frac)
     test_len = len(dataset) - train_len - val_len
-    print(f'Lengths: (train, val, test): ({train_len}, {val_len}, {test_len})')
+    print(f"Lengths: (train, val, test): ({train_len}, {val_len}, {test_len})")
 
-    train, val, test = random_split(dataset, [train_len, val_len, test_len],
-                                    torch.Generator().manual_seed(generator_seed))
+    train, val, test = random_split(
+        dataset,
+        [train_len, val_len, test_len],
+        torch.Generator().manual_seed(generator_seed),
+    )
+
+    # Print signal (label=1) and background (label=0) counts for each split
+    train_labels = [dataset[i][1] for i in train.indices]
+    val_labels = [dataset[i][1] for i in val.indices]
+    test_labels = [dataset[i][1] for i in test.indices]
+
+    print(
+        f"Train: signal: {sum(train_labels)/len(train_labels)}, background: {(len(train_labels) - sum(train_labels)/len(train_labels))}"
+    )
+    print(
+        f"Val: signal: {sum(val_labels)/len(val_labels)}, background: {(len(val_labels) - sum(val_labels)/len(val_labels))}"
+    )
+    print(
+        f"Test: signal: {sum(test_labels)/len(test_labels)}, background: {(len(test_labels) - sum(test_labels)/len(test_labels))}"
+    )
+
     return train, val, test
 
 
-def get_sparse_matrix_paths_cached(signal_dir, background_dir, _path_cache={}):
-    if signal_dir not in _path_cache:
-        signal_paths = [entry.path for entry in sorted(os.scandir(signal_dir), key=lambda x: x.name) if entry.is_file()]
-        _path_cache[signal_dir] = signal_paths
+def extract_labels(dataset, indices):
+    return [dataset[i][1] for i in indices]
 
-    if background_dir not in _path_cache:
-        background_paths = [entry.path for entry in sorted(os.scandir(background_dir), key=lambda x: x.name) if
-                            entry.is_file()]
-        _path_cache[background_dir] = background_paths
 
-    return _path_cache[signal_dir] + _path_cache[background_dir]
+def strat_meta_split(dataset, labels, train_frac, val_frac, generator_seed):
+    class_labels = dataset.labels
+    decays = dataset.decay
+    # create a split to train&val and test first
+
+    splitter_train_val = StratifiedShuffleSplit(
+        n_splits=1, train_size=0.95, test_size=0.05, random_state=generator_seed
+    )
+    train_val_indices, test_indices = next(
+        splitter_train_val.split(np.zeros(len(class_labels)), class_labels)
+    )
+    train_val_data = Subset(dataset, train_val_indices)
+    test_data = Subset(dataset, test_indices)
+    train_val_labels = [class_labels[i] for i in train_val_indices]
+    test_labels = [class_labels[i] for i in test_indices]
+
+    # split the train_val into train and val
+    splitter_val = StratifiedShuffleSplit(
+        n_splits=1, train_size=0.90, test_size=0.05, random_state=generator_seed
+    )
+    # split the train_val subset into train and val
+    train_indices, val_indices = next(
+        splitter_val.split(np.zeros(len(train_val_labels)), train_val_labels)
+    )
+    train_data = Subset(train_val_data, train_indices)
+    val_data = Subset(train_val_data, val_indices)
+
+    print(
+        f"Lengths: (train, val, test): ({len(train_data)}, {len(val_data)}, {len(test_data)})"
+    )
+    # count decay modes in train, val, test
+    train_decays = [decays[i] for i in train_indices]
+    val_decays = [decays[i] for i in val_indices]
+    test_decays = [decays[i] for i in test_indices]
+
+    train_counts = Counter(train_decays)
+    val_counts = Counter(val_decays)
+    test_counts = Counter(test_decays)
+
+    print(f"Train: {train_counts}")
+    print(f"Val: {val_counts}")
+    print(f"Test: {test_counts}")
+
+    return train_data, val_data, test_data
 
 
 def load_checkpoint(model, checkpoint_path):
@@ -54,8 +222,10 @@ def load_checkpoint(model, checkpoint_path):
     model_state_dict = model.state_dict()
 
     # Remove the "module." prefix from keys in the checkpoint
-    checkpoint_state_dict = {key.replace("module.", ""): value for key, value in
-                             checkpoint['model_state_dict'].items()}
+    checkpoint_state_dict = {
+        key.replace("module.", ""): value
+        for key, value in checkpoint["model_state_dict"].items()
+    }
 
     missing_keys = set(model_state_dict.keys()) - set(checkpoint_state_dict.keys())
     unexpected_keys = set(checkpoint_state_dict.keys()) - set(model_state_dict.keys())
@@ -66,41 +236,74 @@ def load_checkpoint(model, checkpoint_path):
     if unexpected_keys:
         print(f"Unexpected keys in state_dict: {unexpected_keys}")
 
-    model.load_state_dict(checkpoint_state_dict, strict=False)  # strict=False to ignore missing and unexpected keys
+    model.load_state_dict(
+        checkpoint_state_dict, strict=False
+    )  # strict=False to ignore missing and unexpected keys
 
 
 @weave.op()
-def one_epoch_lfm(model, phase, dataloaders, optimizer, criterion, scheduler, threshold, device, log_df, is_best_epoch):
+def one_epoch_lfm(
+    model,
+    phase,
+    dataloaders,
+    optimizer,
+    criterion,
+    scheduler,
+    threshold,
+    device,
+    log_df,
+    is_best_epoch,
+):
+    start_time = time.time()
+    loggy.info(f"<fn: one_epoch_lfm>, phase: {phase} ")
     temp_log_data = []
     all_predictions = []
     all_responses = []
     all_labels = []
 
-    model.train() if phase == 'train' else model.eval()
+    model.train() if phase == "train" else model.eval()
     running_loss = 0.0
     running_corrects = 0.0
     total = 0.0
 
-    pos_key = f'p{phase}'
-    neg_key = f'n{phase}'
+    pos_key = f"p{phase}"
 
-    for data_planes in zip(*[dataloaders[i][pos_key] for i in range(3)],
-                           *[dataloaders[i][neg_key] for i in range(3)]):
+    ################################################################
+    ## This is only applicable if we choose to use signed images ##
+    # neg_key = f'n{phase}'
+    # for data_planes in zip(*[dataloaders[i][pos_key] for i in range(3)],
+    #                        *[dataloaders[i][neg_key] for i in range(3)]):
+    ################################################################
+
+    for batch_idx, data_planes in enumerate(
+        zip(*[dataloaders[i][pos_key] for i in range(3)])
+    ):
+        batch_start_time = time.time()
+        loggy.debug(f"Processing batch {batch_idx + 1}")
         optimizer.zero_grad()
         inputs, labels = [], []
 
         for data in data_planes[:3]:
             inputs.append(data[0].to(device))
-        for data in data_planes[3:]:
-            inputs.append(data[0].to(device))
+        # for data in data_planes[3:]:
+        #     inputs.append(data[0].to(device))
         labels = data_planes[0][1].unsqueeze(1).float().to(device)
-        with torch.set_grad_enabled(phase == 'train'):
+
+        forward_pass_start_time = time.time()
+        with torch.set_grad_enabled(phase == "train"):
             output = model(*inputs)
             loss = criterion(output, labels)
+            loggy.info(
+                f"Forward pass done in {time.time() - forward_pass_start_time:.4f} s"
+            )
 
-            if phase == 'train':
+            if phase == "train":
+                backward_pass_start_time = time.time()
                 loss.backward()
                 optimizer.step()
+                loggy.info(
+                    f"Backward pass done in {time.time() - backward_pass_start_time:.4f} s"
+                )
 
         predictions = (output > threshold).float()
         all_predictions.extend(predictions.cpu().numpy())
@@ -113,9 +316,15 @@ def one_epoch_lfm(model, phase, dataloaders, optimizer, criterion, scheduler, th
 
         if is_best_epoch:
             for i, label in enumerate(labels.cpu().numpy()):
-                temp_log_data.append({'ground_truth': label, 'ensemble_output': torch.sigmoid(output[i]).item()})
+                temp_log_data.append(
+                    {
+                        "ground_truth": label,
+                        "ensemble_output": torch.sigmoid(output[i]).item(),
+                    }
+                )
+        loggy.info(f"Batch processed in {time.time() - batch_start_time:.4f} s")
 
-    if phase == 'train':
+    if phase == "train":
         scheduler.step()
 
     if is_best_epoch:
@@ -129,20 +338,35 @@ def one_epoch_lfm(model, phase, dataloaders, optimizer, criterion, scheduler, th
     recall = recall_score(all_labels, all_predictions, zero_division=0)
     precision = precision_score(all_labels, all_predictions)
 
-    wandb.log({
-        f"{phase} loss": epoch_loss,
-        f"{phase} accuracy": epoch_acc,
-        f"{phase} precision": precision,
-        f"{phase} recall": recall,
-        f"{phase} f1": f1
-    })
+    wandb.log(
+        {
+            f"{phase} loss": epoch_loss,
+            f"{phase} accuracy": epoch_acc,
+            f"{phase} precision": precision,
+            f"{phase} recall": recall,
+            f"{phase} f1": f1,
+        }
+    )
+
+    loggy.info(f"Phase {phase} completed in {time.time() - start_time:.4f} seconds")
 
     return epoch_loss, epoch_acc, log_df
 
 
 @weave.op()
-def train_lfm(model, dataloaders, optimizer, criterion, scheduler, device, num_epochs, patience, df_train, df_val,
-              df_test):
+def train_lfm(
+    model,
+    dataloaders,
+    optimizer,
+    criterion,
+    scheduler,
+    device,
+    num_epochs,
+    patience,
+    df_train,
+    df_val,
+    df_test,
+):
     train_loss_values = []
     val_loss_values = []
 
@@ -155,15 +379,35 @@ def train_lfm(model, dataloaders, optimizer, criterion, scheduler, device, num_e
     best_epoch = None
 
     for epoch in range(num_epochs):
-        is_current_best = (epoch == best_epoch)
+        is_current_best = epoch == best_epoch
 
-        train_loss, train_acc, df_train = one_epoch_lfm(model, 'train', dataloaders, optimizer, criterion, scheduler,
-                                                        0.5, device, df_train, is_current_best)
+        train_loss, train_acc, df_train = one_epoch_lfm(
+            model,
+            "train",
+            dataloaders,
+            optimizer,
+            criterion,
+            scheduler,
+            0.5,
+            device,
+            df_train,
+            is_current_best,
+        )
         train_loss_values.append(train_loss)
         train_acc_values.append(train_acc)
 
-        val_loss, val_acc, df_val = one_epoch_lfm(model, 'val', dataloaders, optimizer, criterion, scheduler,
-                                                  0.5, device, df_val, is_current_best)
+        val_loss, val_acc, df_val = one_epoch_lfm(
+            model,
+            "val",
+            dataloaders,
+            optimizer,
+            criterion,
+            scheduler,
+            0.5,
+            device,
+            df_val,
+            is_current_best,
+        )
         val_loss_values.append(val_loss)
         val_acc_values.append(val_acc)
 
@@ -176,45 +420,113 @@ def train_lfm(model, dataloaders, optimizer, criterion, scheduler, device, num_e
             no_improvement_epochs += 1
 
         if no_improvement_epochs >= patience:
-            print(f'No improvement for {patience} epochs, stopping')
+            loggy.info(f"No improvement for {patience} epochs, stopping")
             break
 
     if best_epoch is not None:
         model.load_state_dict(best_model_wts)
-        _, _, df_train = one_epoch_lfm(model, 'train', dataloaders, optimizer, criterion, scheduler,
-                                       0.5, device, df_train, True)
+        _, _, df_train = one_epoch_lfm(
+            model,
+            "train",
+            dataloaders,
+            optimizer,
+            criterion,
+            scheduler,
+            0.5,
+            device,
+            df_train,
+            True,
+        )
 
-        _, _, df_val = one_epoch_lfm(model, 'val', dataloaders, optimizer, criterion, scheduler,
-                                     0.5, device, df_val, True)
+        _, _, df_val = one_epoch_lfm(
+            model,
+            "val",
+            dataloaders,
+            optimizer,
+            criterion,
+            scheduler,
+            0.5,
+            device,
+            df_val,
+            True,
+        )
 
-        _, _, df_test = one_epoch_lfm(model, 'test', dataloaders, optimizer, criterion, scheduler,
-                                      0.5, device, df_test, True)
+        _, _, df_test = one_epoch_lfm(
+            model,
+            "test",
+            dataloaders,
+            optimizer,
+            criterion,
+            scheduler,
+            0.5,
+            device,
+            df_test,
+            True,
+        )
 
-        save_path = '/mnt/lustre/helios-home/gartmann/venv/checkpoints/late_fusion/late_fusion_{}.pt'.format(
-            time.strftime('%d-%m_%H-%M'))
+        # if not os.path.exists('/mnt/lustre/helios-home/gartmann/venv/checkpoints/late_fusion/'):
+        #     os.mkdir('/mnt/lustre/helios-home/gartmann/venv/checkpoints/late_fusion/')
 
-        torch.save({'model_state_dict': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict()}, save_path)
+        save_path = "/mnt/lustre/helios-home/gartmann/venv/checkpoints/late_fusion/late_fusion_{}.pt".format(
+            time.strftime("%d-%m_%H-%M")
+        )
 
-        date_time = time.strftime('%d-%m_%H-%M')
+        # save_path = '/mnt/nfs19/gartman/checkpoints/lfm/late_fusion_{}.pt'.format(
+        #     time.strftime('%d-%m_%H-%M'))
 
-        df_train.to_csv(f'./diagnostics/metrics-df/lfm/df_train_{date_time}_lfm.csv')
-        df_val.to_csv(f'./diagnostics/metrics-df/lfm//df_val_{date_time}_lfm.csv')
-        df_test.to_csv(f'./diagnostics/metrics-df/lfm/df_test_{date_time}_lfm.csv')
+        torch.save(
+            {
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+            },
+            save_path,
+        )
 
-    return model, train_loss_values, val_loss_values, train_acc_values, val_acc_values, best_epoch
+        date_time = time.strftime("%d-%m_%H-%M")
+
+        # if not os.path.exists(f'./diagnostics/metrics-df/lfm/'):
+        #     os.mkdir(f'./diagnostics/metrics-df/lfm/')
+
+        df_train.to_csv(f"./diagnostics/metrics-df/lfm/df_train_{date_time}_lfm.csv")
+        df_val.to_csv(f"./diagnostics/metrics-df/lfm//df_val_{date_time}_lfm.csv")
+        df_test.to_csv(f"./diagnostics/metrics-df/lfm/df_test_{date_time}_lfm.csv")
+
+        # df_train.to_csv(f'/mnt/nfs19/gartman/diagnostics/metrics-df/lfm/df_train_{date_time}_lfm.csv')
+        # df_val.to_csv(f'/mnt/nfs19/gartman/diagnostics/metrics-df/lfm/df_val_{date_time}_lfm.csv')
+        # df_test.to_csv(f'/mnt/nfs19/gartman/diagnostics/metrics-df/lfm/df_test_{date_time}_lfm.csv')
+
+    return (
+        model,
+        train_loss_values,
+        val_loss_values,
+        train_acc_values,
+        val_acc_values,
+        best_epoch,
+    )
 
 
 @weave.op()
-def train_one_epoch(epoch_idx, model, train_loader, optimizer, criterion, device, scheduler, table, df, is_best_epoch):
+def train_one_epoch(
+    epoch_idx,
+    model,
+    train_loader,
+    optimizer,
+    criterion,
+    device,
+    scheduler,
+    table,
+    df,
+    is_best_epoch,
+):
     running_loss = 0.0
     correct = 0
     total = 0
     epoch_start = time.time()
     temp_train_data = []
-
     model.train()
 
     for batch_idx, (inputs, labels) in enumerate(train_loader):
+
         inputs, labels = inputs.to(device), labels.float().unsqueeze(1).to(device)
         optimizer.zero_grad()
 
@@ -232,8 +544,11 @@ def train_one_epoch(epoch_idx, model, train_loader, optimizer, criterion, device
         if is_best_epoch:
             for lab, pred in zip(labels, torch.sigmoid(outputs)):
                 table.add_data(lab.item(), pred.item())
-                new_row = {'ground_truth': lab.item(), 'output': pred.item()}
+                new_row = {"ground_truth": lab.item(), "output": pred.item()}
                 temp_train_data.append(new_row)
+
+        # batch_times.append((batch_end - batch_start)/ 60)
+        # print(f'Batch {batch_idx} time {(batch_end - batch_start)/ 60:.2f} minutes')
 
     if is_best_epoch:
         tempdf = pd.DataFrame(temp_train_data)
@@ -244,10 +559,20 @@ def train_one_epoch(epoch_idx, model, train_loader, optimizer, criterion, device
     scheduler.step()
 
     wandb.log({f"train_acc": acc, f"train_loss": epoch_loss})
-    print(f'Epoch: {epoch_idx} | Loss: {epoch_loss:.4f} | Accuracy: {acc:.4f}')
+    print(f"Epoch: {epoch_idx} | Loss: {epoch_loss:.4f} | Accuracy: {acc:.4f}")
 
     epoch_end = time.time()
-    print(f'Epoch time: {(epoch_end - epoch_start) / 60:.2f} minutes')
+    print(f"Epoch time: {(epoch_end - epoch_start) / 60:.2f} minutes")
+    print(f"Intermediate save at {epoch_idx}")
+    # Save checkpoint
+    save_path = f"/mnt/lustre/helios-home/gartmann/venv/checkpoints_wt_avg/resnet18_{epoch_idx}_at{time.strftime('%d-%m_%H-%M')}.pt"
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+        },
+        save_path,
+    )
 
     return epoch_loss, acc, df
 
@@ -281,17 +606,19 @@ def validate(model, val_loader, criterion, device, table, df, epoch_idx, is_best
     recall = recall_score(all_labels, all_predictions, zero_division=0)
     f1 = f1_score(all_labels, all_predictions, zero_division=0)
 
-    wandb.log({
-        "val_loss": average_loss,
-        "val_accuracy": accuracy,
-        "val_precision": precision,
-        "val_recall": recall,
-        "val_f1": f1
-    })
+    wandb.log(
+        {
+            "val_loss": average_loss,
+            "val_accuracy": accuracy,
+            "val_precision": precision,
+            "val_recall": recall,
+            "val_f1": f1,
+        }
+    )
 
     if is_best_epoch:
         for lab, resp in zip(all_labels, all_responses):
-            new_row = {'ground_truth': lab.item(), 'output': resp.item()}
+            new_row = {"ground_truth": lab.item(), "output": resp.item()}
             temp_val_data.append(new_row)
             table.add_data(lab.item(), resp.item())
     if is_best_epoch:
@@ -319,20 +646,37 @@ def test_model(model, plane, checkpoint_pth, test_loader, device, df, test_table
             all_responses.extend(torch.sigmoid(outputs).cpu().numpy())
 
     for lab, resp in zip(all_labels, all_responses):
-        new_row = {'ground_truth': lab.item(), 'output': resp.item()}
+        new_row = {"ground_truth": lab.item(), "output": resp.item()}
         temp_test_data.append(new_row)
         test_table.add_data(lab.item(), resp.item())
 
     tempdf = pd.DataFrame(temp_test_data)
     df = pd.concat([df, tempdf], ignore_index=True)
 
-    date_time = time.strftime('%d-%m_%H-%M')
-    df.to_csv(f'./diagnostics/metrics-df/df_test_{date_time}_resnet18_h5_plane{plane}.csv')
+    date_time = time.strftime("%d-%m_%H-%M")
+    df.to_csv(
+        f"./diagnostics/metrics-df/df_test_{date_time}_resnet18_h5_plane{plane}.csv"
+    )
 
 
 @weave.op()
-def train_model(model, train_loader, optimizer, criterion, scheduler, val_loader, device, num_epochs, patience, table,
-                val_table, df_train, df_val, plane):
+def train_model(
+    model,
+    train_loader,
+    optimizer,
+    criterion,
+    scheduler,
+    val_loader,
+    device,
+    num_epochs,
+    patience,
+    table,
+    val_table,
+    df_train,
+    df_val,
+    plane,
+    seed,
+):
     train_loss_values = []
     val_loss_values = []
 
@@ -349,14 +693,33 @@ def train_model(model, train_loader, optimizer, criterion, scheduler, val_loader
 
     best_epoch = None
     for epoch in range(num_epochs):
-        is_current_best = (epoch == best_epoch)
-        train_loss, train_acc, df_train = train_one_epoch(epoch, model, train_loader, optimizer, criterion, device,
-                                                          scheduler, table, df_train, is_current_best)
+        is_current_best = epoch == best_epoch
+        train_loss, train_acc, df_train = train_one_epoch(
+            epoch,
+            model,
+            train_loader,
+            optimizer,
+            criterion,
+            device,
+            scheduler,
+            table,
+            df_train,
+            is_current_best,
+        )
+        # [Rest of the training code]
         train_loss_values.append(train_loss)
         train_acc_values.append(train_acc)
 
-        val_loss, val_acc, val_precision, recall, f1, df_val = validate(model, val_loader, criterion, device, val_table,
-                                                                        df_val, epoch, is_current_best)
+        val_loss, val_acc, val_precision, recall, f1, df_val = validate(
+            model,
+            val_loader,
+            criterion,
+            device,
+            val_table,
+            df_val,
+            epoch,
+            is_current_best,
+        )
 
         val_loss_values.append(val_loss)
         val_acc_values.append(val_acc)
@@ -374,31 +737,135 @@ def train_model(model, train_loader, optimizer, criterion, scheduler, val_loader
             no_improvement_epochs += 1
 
         if no_improvement_epochs >= patience:
-            print(f'No improvement for {patience} epochs, stopping')
+            print(f"No improvement for {patience} epochs, stopping")
             break
 
     if best_epoch is not None:
         model.load_state_dict(best_model_wts)
 
         # Re-run training and validation for the best epoch to log the metrics
-        _, _, df_train = train_one_epoch(best_epoch, model, train_loader, optimizer, criterion, device,
-                                         scheduler, table, df_train, True)
-        _, _, _, _, _, df_val = validate(model, val_loader, criterion, device, val_table, df_val, best_epoch, True)
+        _, _, df_train = train_one_epoch(
+            best_epoch,
+            model,
+            train_loader,
+            optimizer,
+            criterion,
+            device,
+            scheduler,
+            table,
+            df_train,
+            True,
+        )
+        _, _, _, _, _, df_val = validate(
+            model, val_loader, criterion, device, val_table, df_val, best_epoch, True
+        )
 
     # Save checkpoint
-    save_path = '/mnt/lustre/helios-home/gartmann/venv/checkpoints/resnet18_{}_{}.pt'.format(
-        time.strftime('%d-%m_%H-%M'), plane)
+    save_path = "/mnt/lustre/helios-home/gartmann/venv/checkpoints_wt_avg/resnet18_{}_{}.pt".format(
+        seed, plane
+    )
 
-    torch.save({'model_state_dict': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict()}, save_path)
-    print('Checkpoint saved at {}'.format(save_path))
-    date_time = time.strftime('%d-%m_%H-%M')
+    # save_path = '/mnt/nfs19/gartman/checkpoints/branch/resnet18_{}_{}_{}.pt'.format(
+    #     sgn, time.strftime('%d-%m_%H-%M'), sgn, plane)
 
+    torch.save(
+        {
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+        },
+        save_path,
+    )
+    print("Checkpoint saved at {}".format(save_path))
+    date_time = time.strftime("%d-%m_%H-%M")
+
+    # Log tables to W&B and save locally
     wandb.log({f"train_table_{date_time}": table})
     wandb.log({f"val_table_{date_time}": val_table})
 
+    # if not os.path.exists('./diagnostics/metrics-df'):
+    #     os.mkdir('./diagnostics/metrics-df')
 
-    df_train.to_csv(f'./diagnostics/metrics-df/df_train_{date_time}_resnet18_h5_plane{plane}.csv')
-    df_val.to_csv(f'./diagnostics/metrics-df/df_val_{date_time}_resnet18_h5_plane{plane}.csv')
+    df_train.to_csv(
+        f"./diagnostics/metrics-df/df_train_{date_time}_resnet18_h5_plane{plane}.csv"
+    )
+    df_val.to_csv(
+        f"./diagnostics/metrics-df/df_val_{date_time}_resnet18_h5_plane{plane}.csv"
+    )
 
-    results = [model, train_loss_values, val_loss_values, train_acc_values, val_acc_values, precision_vals, recall_vals, f1_vals, best_epoch]
-    return results
+    # df_train.to_csv(f'/mnt/nfs19/gartman/diagnostics/metrics-df/branch/df_train_{date_time}_resnet18_{sgn}_plane{plane}.csv')
+    # df_val.to_csv(f'/mnt/nfs19/gartman/diagnostics/metrics-df/branch/df_val_{date_time}_resnet18_{sgn}_plane{plane}.csv')
+
+    return (
+        model,
+        train_loss_values,
+        val_loss_values,
+        train_acc_values,
+        val_acc_values,
+        precision_vals,
+        recall_vals,
+        f1_vals,
+        best_epoch,
+    )
+
+
+def eval_decay_distrib(
+    train_subset, val_subset, test_subset, dataset, output_dir="plots"
+):
+
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+
+    train_decays = [dataset.decay[i] for i in train_subset.indices]
+    val_decays = [dataset.decay[i] for i in val_subset.indices]
+    test_decays = [dataset.decay[i] for i in test_subset.indices]
+
+    train_labels = [dataset.labels[i] for i in train_subset.indices]
+    val_labels = [dataset.labels[i] for i in val_subset.indices]
+    test_labels = [dataset.labels[i] for i in test_subset.indices]
+
+    # define palettes for signal and background
+    # signal_palette = sns.color_palette("Blues", len(set(train_decays)))
+    # background_palette = sns.color_palette("Oranges", len(set(train_decays)))
+
+    def plot_decays(decay_modes, labels, split_name, output_dir):
+        decay_mode_counter_signal = Counter(
+            [mode for mode, label in zip(decay_modes, labels) if label == 1]
+        )
+        decay_mode_counter_background = Counter(
+            [mode for mode, label in zip(decay_modes, labels) if label == 0]
+        )
+
+        sorted_decay_modes = sorted(set(decay_modes))
+        signal_counts = []
+        background_counts = []
+
+        plt.figure(figsize=(10, 6), dpi=120)
+        x = range(len(sorted_decay_modes))
+        bar_width = 0.4
+
+        plt.bar(x, signal_counts, width=bar_width, label="Signal")
+        plt.bar(
+            [p + bar_width for p in x],
+            background_counts,
+            width=bar_width,
+            label="Background",
+        )
+
+        plt.xlabel("Decay Modes")
+        plt.ylabel("Counts")
+        plt.title(f"{split_name} Decay Mode Distribution")
+        plt.xticks([p + bar_width / 2 for p in x], sorted_decay_modes, rotation=45)
+        plt.legend()
+
+        plot_path = os.path.join(
+            output_dir, f"{split_name}_decay_mode_distribution.png"
+        )
+        plt.savefig(plot_path)
+        plt.close()
+        print(f"Saved {split_name} decay mode distribution plot at {plot_path}")
+
+    plot_decays(train_decays, train_labels, "Train", output_dir)
+    plot_decays(val_decays, val_labels, "Validation", output_dir)
+    plot_decays(test_decays, test_labels, "Test", output_dir)
+
+    print("Decay distribution eval and plots complete.")
