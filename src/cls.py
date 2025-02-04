@@ -9,10 +9,26 @@ import torch.nn.functional as F
 import h5py
 import weave
 from functools import lru_cache
+import functools
 import multiprocessing as mp
 import os
 from scipy import sparse as sp
 from scipy.sparse import csr_matrix
+import random
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor
+import concurrent.futures
+import logging
+from multiprocessing import Pool, cpu_count
+import time
+import itertools
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(message)s",
+    handlers=[logging.StreamHandler()],
+)
 
 
 class ModifiedMobileNetV3(nn.Module):
@@ -36,206 +52,70 @@ class ModifiedMobileNetV3(nn.Module):
 
 
 class SparseMatrixDataset(Dataset):
-    # @weave.op()
-    def __init__(self, evt_dirs):
-        self.evt_dirs = evt_dirs
-        self.labels = self.assign_labels()
+    def __init__(self, event_paths, plane_idx):
+        self.event_paths = event_paths
+        self.plane_idx = plane_idx
         self.transform = transforms.Compose(
             [transforms.Resize((500, 500)), transforms.ToTensor()]
         )
 
-        # self.mean, self.std = self._compute_mean_std_parallel()
+        print("[INFO] Initializing dataset...")
+        start_time = time.time()
 
-        self.transform = transforms.Compose(
-            [
-                transforms.Resize((500, 500)),
-                transforms.ToTensor(),
-                # transforms.Normalize(mean=[self.mean], std=[self.std]),
-            ]
+        collected_data = list(self._collect_sparse_matrices())
+        self.file_paths, self.labels = (
+            zip(*collected_data) if collected_data else ([], [])
         )
+
+        print(f"[INFO] Dataset initialized in {time.time() - start_time:.2f} seconds.")
+
+    def _collect_sparse_matrices(self):
+
+        for evt_path in self.event_paths:
+            plane_path = evt_path / f"plane{self.plane_idx}"
+            if plane_path.is_dir():
+                decay_mode = evt_path.parent.name
+
+                yield from (
+                    (str(f), (1 if "pdk_decays" in str(evt_path) else 0, decay_mode))
+                    for f in plane_path.iterdir()
+                    if f.suffix == ".npz"
+                )
 
     def __len__(self):
-        return len(self.evt_dirs)
+        return len(self.file_paths)
 
     def __getitem__(self, idx):
-        if torch.is_tensor(idx):
-            idx = idx.tolist()
 
+        if idx >= len(self.file_paths):
+            raise IndexError("Index out of range")
+
+        sparse_matrix_path = self.file_paths[idx]
         label = self.labels[idx]
-        current_path = self.evt_dirs[idx]
-        image = self.process_sparse_matrix(current_path)
 
+        image = self.process_sparse_matrix(sparse_matrix_path)
         return image, label
-
-    def assign_labels(self):
-        labels = []
-        for sparse_matrix_path in self.evt_dirs:
-            if "signal" in sparse_matrix_path:
-                labels.append(1)
-            elif "background" in sparse_matrix_path:
-                labels.append(0)
-        print(
-            f"Signal / background ratio = {sum(labels) / (len(labels) - sum(labels))}"
-        )
-        return labels
 
     def process_sparse_matrix(self, sparse_matrix_path):
-        sparse_matrix = sp.sparse.load_npz(sparse_matrix_path)
-        image = Image.fromarray(sparse_matrix.toarray().astype(np.uint8), mode="L")
-        image = self.transform(image)
-        return image
 
-    # @weave.op()
-    # def _compute_mean_std_parallel(self):
-    #     num_processes = mp.cpu_count()
-    #     print(f"Number of rinning processes: {num_processes}")
-
-    #     chunk_size = len(self.evt_dirs) // num_processes
-    #     print(f"Creating chunks of size {chunk_size}")
-
-    #     chunks = [
-    #         self.evt_dirs[i : i + chunk_size]
-    #         for i in range(0, len(self.evt_dirs), chunk_size)
-    #     ]
-
-    #     with mp.Pool(processes=num_processes) as pool:
-    #         results = pool.map(self._process_chunk, chunks)
-
-    #     total_sum = np.sum([result[0] for result in results])
-    #     total_sum_of_squares = np.sum([result[1] for result in results])
-    #     num_samples = np.sum([result[2] for result in results])
-
-    #     mean = total_sum / num_samples
-    #     std = np.sqrt(total_sum_of_squares / num_samples - mean**2)
-
-    #     print(f"Computed mean: {mean}, std: {std}")
-    #     return mean, std
-
-    @staticmethod
-    def _process_chunk(chunk):
-        total_sum = 0.0
-        total_sum_of_squares = 0.0
-        num_samples = 0
-
-        for path in chunk:
-            sparse_matrix = sp.sparse.load_npz(path)
-            data = sparse_matrix.toarray().astype(np.float32)
-            total_sum += np.sum(data)
-            total_sum_of_squares += np.sum(data**2)
-            num_samples += data.size
-
-        return total_sum, total_sum_of_squares, num_samples
-
-
-class SparseMatrixDatasetMeta(Dataset):
-    def __init__(self, decay_dirs, plane_idx):
-        self.plane_idx = plane_idx
-        # self.evt_dirs = evt_dirs
-        self.decay_dirs = decay_dirs
-        self.labels, self.decay = self.assign_labels()
-        # self.mu, self.sigma = self.compute_mean_std()
-        self.transform = transforms.Compose(
-            [
-                transforms.Resize((500, 500)),
-                transforms.ToTensor(),
-                # transforms.Normalize(mean=[self.mu], std=[self.sigma]),
-            ]
-        )
-
-    def __len__(self):
-        if not hasattr(self, "_len"):
-            self._len = sum(
-                len(os.listdir(dir)) for dir in self.decay_dirs if os.path.isdir(dir)
-            )
-        return self._len
-
-    def __getitem__(self, idx):
-        if not hasattr(self, "_file_map"):
-            self._file_map = []
-            for decay_dir in self.decay_dirs:
-                for evt_dir in os.listdir(decay_dir):
-                    if os.path.isdir(os.path.join(decay_dir, evt_dir)):
-                        for plane_dir in os.listdir(os.path.join(decay_dir, evt_dir)):
-                            if f"plane{self.plane_idx}" in plane_dir:
-                                files = os.listdir(
-                                    os.path.join(decay_dir, evt_dir, plane_dir)
-                                )
-                                self._file_map.extend(
-                                    [
-                                        (decay_dir, evt_dir, plane_dir, file)
-                                        for file in files
-                                    ]
-                                )
-
-        # Get the file corresponding to idx
         try:
-            decay_dir, evt_dir, plane_dir, file = self._file_map[idx]
-        except IndexError:
-            raise IndexError(
-                f"Index {idx} out of range for dataset with length {len(self)}"
+            sparse_matrix = np.load(sparse_matrix_path)
+            sparse_matrix = csr_matrix(
+                (
+                    sparse_matrix["data"],
+                    sparse_matrix["indices"],
+                    sparse_matrix["indptr"],
+                ),
+                shape=sparse_matrix["shape"],
             )
-
-        # Process the specific file
-        label = self.labels[idx]
-        filepath = os.path.join(decay_dir, evt_dir, plane_dir, file)
-        sparse_data = np.load(filepath)
-        sparse_matrix = csr_matrix(
-            (sparse_data["data"], sparse_data["indices"], sparse_data["indptr"]),
-            shape=sparse_data["shape"],
-        )
-        image = Image.fromarray(sparse_matrix.toarray().astype(np.uint8), mode="L")
-        image = self.transform(image)
-
-        return image, label
-
-    def _get_single_item(self, idx):
-        label = self.labels[idx]
-        image = self.process_sparse_matrix()
-        return image, label
-
-    def process_sparse_matrix(self):
-        for decay_dir in self.decay_dirs:
-            for evt_dir in os.listdir(decay_dir):
-                if os.path.isdir(evt_dir):
-                    for plane_dir in os.listdir(evt_dir):
-                        if f"plane{self.plane_idx}" in plane_dir:
-                            filepath = os.listdir(
-                                os.path.join(decay_dir, evt_dir, plane_dir)
-                            )[0]
-                            filepath = os.path.join(
-                                decay_dir, evt_dir, plane_dir, filepath
-                            )
-                            sparse_data = np.load(filepath)
-                            sparse_matrix = csr_matrix(
-                                (
-                                    sparse_data["data"],
-                                    sparse_data["indices"],
-                                    sparse_data["indptr"],
-                                ),
-                                shape=sparse_data["shape"],
-                            )
-                            image = Image.fromarray(
-                                sparse_matrix.toarray().astype(np.uint8), mode="L"
-                            )
-                            image = self.transform(image)
-                            return image
-
-    def assign_labels(self):
-        labels = []
-        print(self.decay_dirs)
-        for decay_dir in self.decay_dirs:
-            decay_mode = os.path.basename(decay_dir)
-            for evt_dir in os.listdir(decay_dir):
-                label = 1 if "pdk_decays" in decay_dir else 0
-                labels.append((label, decay_mode))
-        signal_count = sum(label[0] for label in labels)
-        oh_labels = [label[0] for label in labels]
-        decay_labels = [label[1] for label in labels]
-        print(decay_labels)
-        print(
-            f"Signal / background ratio = {signal_count / (len(labels) - signal_count) if len(labels) > signal_count else 0}"
-        )
-        return oh_labels, decay_labels
+            image = Image.fromarray(sparse_matrix.toarray().astype(np.uint8), mode="L")
+            image = self.transform(image)
+        except Exception as e:
+            print(
+                f"[WARNING] Failed to load sparse matrix: {sparse_matrix_path}. Error: {e}"
+            )
+            image = torch.zeros((1, 500, 500))
+        return image
 
 
 class ModifiedResNet(nn.Module):
@@ -285,6 +165,8 @@ class ModifiedEfficientNet(nn.Module):
         self.model = EfficientNet.from_name(
             "efficientnet-b0", num_classes=num_classes, dropout_rate=0.2
         )
+        # modify the first convolutional layer to accept single channel input
+        self.model._conv_stem = nn.Conv2d(1, 32, kernel_size=3, stride=2, bias=False)
         self.model.to(device)
         self.model._dropout = nn.Dropout(p=dropout, inplace=True)
         self.model._swish = nn.Sigmoid()
