@@ -36,20 +36,26 @@ class ModifiedMobileNetV3(nn.Module):
         super(ModifiedMobileNetV3, self).__init__()
         self.device = device
         self.model = models.mobilenet_v3_small()
-        self.model.conv_stem = nn.Conv2d(
-            1, 16, kernel_size=3, stride=2, padding=1, bias=False
+ 
+        self.model.features[0][0] = nn.Conv2d(
+            in_channels=1,  # For grayscale images
+            out_channels=16,
+            kernel_size=3,
+            stride=2,
+            padding=1,
+            bias=False
         )
+        
         self.model.classifier = nn.Sequential(
             nn.Linear(576, 256),
             nn.ReLU(),
             nn.Linear(256, num_classes),
         )
+        
         self.model.to(device)
 
     def forward(self, x):
-        x = self.model(x)
-        return x
-
+        return self.model(x)
 
 class SparseMatrixDataset(Dataset):
     def __init__(self, event_paths, plane_idx):
@@ -66,6 +72,7 @@ class SparseMatrixDataset(Dataset):
         self.file_paths, self.labels = (
             zip(*collected_data) if collected_data else ([], [])
         )
+        self.decay_labels = [label[1] for label in self.labels]
 
         print(f"[INFO] Dataset initialized in {time.time() - start_time:.2f} seconds.")
 
@@ -91,7 +98,7 @@ class SparseMatrixDataset(Dataset):
             raise IndexError("Index out of range")
 
         sparse_matrix_path = self.file_paths[idx]
-        label = self.labels[idx]
+        label = self.labels[idx][0]
 
         image = self.process_sparse_matrix(sparse_matrix_path)
         return image, label
