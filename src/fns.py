@@ -29,7 +29,7 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
 )
 loggy = logging.getLogger(__name__)
-
+logger = logging.getLogger(__name__)
 sys.path.append("./src")
 sys.path.append("./src/net_cfg.json")
 sys.path.append("./src/cls.py")
@@ -39,46 +39,9 @@ sys.path.append("./src/cls.py")
 # ===================== #
 
 sys.path.append("/mnt/lustre/helios-home/gartmann/venv/src/net_cfg.json")
-# sys.path.append('/mnt/nfs19/gartman/code/helpers/net_cfg.json')
 
 with open("/mnt/lustre/helios-home/gartmann/venv/src/net_cfg.json", "r") as cfg:
     config = json.load(cfg)
-
-
-# def get_event_dirs(base_dir):
-#     event_dirs = []
-#     print(f"The base dir is {base_dir}, len: {len(os.listdir(base_dir))}")
-#     # for atmonu only some of the batches
-#     if "atmonu" in base_dir:
-#         batch_to_take = random.sample(
-#             os.listdir(base_dir), int(0.3 * len(os.listdir(base_dir)))
-#         )
-#         print(
-#             f"Taking {len(batch_to_take)} out of {len(os.listdir(base_dir))} batches for atmonu."
-#         )
-#         print(f"Taking batches: {batch_to_take}")
-#         for batch_dir in batch_to_take:
-#             batch_path = os.path.join(base_dir, batch_dir)
-#             if os.path.isdir(batch_path):
-#                 for evt in os.listdir(batch_path):
-#                     evt_path = os.path.join(batch_path, evt)
-#                     if os.path.isdir(evt_path):
-#                         event_dirs.append(evt_path)
-#         return event_dirs
-
-#     elif "pdk" in base_dir:
-#         print(f"Taking {len(os.listdir(base_dir))} batches for pdk.")
-#         for batch_dir in os.listdir(base_dir)[:32]:
-#             batch_path = os.path.join(base_dir, batch_dir)
-#             if os.path.isdir(batch_path):
-#                 for evt in os.listdir(batch_path):
-#                     evt_path = os.path.join(batch_path, evt)
-#                     if os.path.isdir(evt_path):
-#                         event_dirs.append(evt_path)
-#     else:
-#         print("No such dataset.")
-
-#     return event_dirs
 
 
 def get_event_dirs(base_dir):
@@ -172,48 +135,53 @@ def extract_labels(dataset, indices):
 
 
 def strat_meta_split(dataset, labels, train_frac, val_frac, generator_seed):
-    class_labels = dataset.labels
-    decays = dataset.decay
-    # create a split to train&val and test first
+    logger.info("Starting stratified split")
+    
+    # Convert to NumPy arrays for faster indexing
+    class_labels = np.array(dataset.labels)
+    decays = np.array(dataset.decay_labels)
+    
+    # Create a combined stratification key using tuples (class, decay)
+    stratify_labels = np.array([f"{c}_{d}" for c, d in zip(class_labels, decays)])
 
-    splitter_train_val = StratifiedShuffleSplit(
-        n_splits=1, train_size=0.95, test_size=0.05, random_state=generator_seed
+    # First split: train_val (95%) and test (5%)
+    train_val_indices, test_indices = train_test_split(
+        np.arange(len(class_labels)),
+        test_size=0.05,
+        stratify=stratify_labels,
+        random_state=generator_seed
     )
-    train_val_indices, test_indices = next(
-        splitter_train_val.split(np.zeros(len(class_labels)), class_labels)
-    )
+    
     train_val_data = Subset(dataset, train_val_indices)
     test_data = Subset(dataset, test_indices)
-    train_val_labels = [class_labels[i] for i in train_val_indices]
-    test_labels = [class_labels[i] for i in test_indices]
 
-    # split the train_val into train and val
-    splitter_val = StratifiedShuffleSplit(
-        n_splits=1, train_size=0.90, test_size=0.05, random_state=generator_seed
+    logger.info(f"Initial train&val and test split completed")
+    logger.info(f"Train&Val size: {len(train_val_data)}, Test size: {len(test_data)}")
+
+    # Second split: train (90% of train_val) and val (10% of train_val)
+    train_indices, val_indices = train_test_split(
+        train_val_indices,
+        test_size=0.10,
+        stratify=stratify_labels[train_val_indices],
+        random_state=generator_seed
     )
-    # split the train_val subset into train and val
-    train_indices, val_indices = next(
-        splitter_val.split(np.zeros(len(train_val_labels)), train_val_labels)
-    )
-    train_data = Subset(train_val_data, train_indices)
-    val_data = Subset(train_val_data, val_indices)
 
-    print(
-        f"Lengths: (train, val, test): ({len(train_data)}, {len(val_data)}, {len(test_data)})"
-    )
-    # count decay modes in train, val, test
-    train_decays = [decays[i] for i in train_indices]
-    val_decays = [decays[i] for i in val_indices]
-    test_decays = [decays[i] for i in test_indices]
+    train_data = Subset(dataset, train_indices)
+    val_data = Subset(dataset, val_indices)
 
-    train_counts = Counter(train_decays)
-    val_counts = Counter(val_decays)
-    test_counts = Counter(test_decays)
+    logger.info("Train and val split completed")
+    logger.info(f"Train size: {len(train_data)}, Val size: {len(val_data)}")
 
-    print(f"Train: {train_counts}")
-    print(f"Val: {val_counts}")
-    print(f"Test: {test_counts}")
+    # Count decay modes in train, val, test
+    train_counts = Counter(decays[train_indices])
+    val_counts = Counter(decays[val_indices])
+    test_counts = Counter(decays[test_indices])
 
+    logger.info(f"Decay counts in Train: {train_counts}")
+    logger.info(f"Decay counts in Val: {val_counts}")
+    logger.info(f"Decay counts in Test: {test_counts}")
+
+    logger.info("Stratified meta split completed successfully")
     return train_data, val_data, test_data
 
 
@@ -464,15 +432,9 @@ def train_lfm(
             True,
         )
 
-        # if not os.path.exists('/mnt/lustre/helios-home/gartmann/venv/checkpoints/late_fusion/'):
-        #     os.mkdir('/mnt/lustre/helios-home/gartmann/venv/checkpoints/late_fusion/')
-
         save_path = "/mnt/lustre/helios-home/gartmann/venv/checkpoints/late_fusion/late_fusion_{}.pt".format(
             time.strftime("%d-%m_%H-%M")
         )
-
-        # save_path = '/mnt/nfs19/gartman/checkpoints/lfm/late_fusion_{}.pt'.format(
-        #     time.strftime('%d-%m_%H-%M'))
 
         torch.save(
             {
@@ -484,16 +446,9 @@ def train_lfm(
 
         date_time = time.strftime("%d-%m_%H-%M")
 
-        # if not os.path.exists(f'./diagnostics/metrics-df/lfm/'):
-        #     os.mkdir(f'./diagnostics/metrics-df/lfm/')
-
         df_train.to_csv(f"./diagnostics/metrics-df/lfm/df_train_{date_time}_lfm.csv")
         df_val.to_csv(f"./diagnostics/metrics-df/lfm//df_val_{date_time}_lfm.csv")
         df_test.to_csv(f"./diagnostics/metrics-df/lfm/df_test_{date_time}_lfm.csv")
-
-        # df_train.to_csv(f'/mnt/nfs19/gartman/diagnostics/metrics-df/lfm/df_train_{date_time}_lfm.csv')
-        # df_val.to_csv(f'/mnt/nfs19/gartman/diagnostics/metrics-df/lfm/df_val_{date_time}_lfm.csv')
-        # df_test.to_csv(f'/mnt/nfs19/gartman/diagnostics/metrics-df/lfm/df_test_{date_time}_lfm.csv')
 
     return (
         model,
@@ -525,7 +480,7 @@ def train_one_epoch(
     temp_train_data = []
     model.train()
 
-    for batch_idx, (inputs, labels) in enumerate(train_loader):
+    for inputs, labels in train_loader:
 
         inputs, labels = inputs.to(device), labels.float().unsqueeze(1).to(device)
         optimizer.zero_grad()
@@ -765,9 +720,6 @@ def train_model(
         seed, plane
     )
 
-    # save_path = '/mnt/nfs19/gartman/checkpoints/branch/resnet18_{}_{}_{}.pt'.format(
-    #     sgn, time.strftime('%d-%m_%H-%M'), sgn, plane)
-
     torch.save(
         {
             "model_state_dict": model.state_dict(),
@@ -782,18 +734,12 @@ def train_model(
     wandb.log({f"train_table_{date_time}": table})
     wandb.log({f"val_table_{date_time}": val_table})
 
-    # if not os.path.exists('./diagnostics/metrics-df'):
-    #     os.mkdir('./diagnostics/metrics-df')
-
     df_train.to_csv(
         f"./diagnostics/metrics-df/df_train_{date_time}_resnet18_h5_plane{plane}.csv"
     )
     df_val.to_csv(
         f"./diagnostics/metrics-df/df_val_{date_time}_resnet18_h5_plane{plane}.csv"
     )
-
-    # df_train.to_csv(f'/mnt/nfs19/gartman/diagnostics/metrics-df/branch/df_train_{date_time}_resnet18_{sgn}_plane{plane}.csv')
-    # df_val.to_csv(f'/mnt/nfs19/gartman/diagnostics/metrics-df/branch/df_val_{date_time}_resnet18_{sgn}_plane{plane}.csv')
 
     return (
         model,
@@ -822,10 +768,6 @@ def eval_decay_distrib(
     train_labels = [dataset.labels[i] for i in train_subset.indices]
     val_labels = [dataset.labels[i] for i in val_subset.indices]
     test_labels = [dataset.labels[i] for i in test_subset.indices]
-
-    # define palettes for signal and background
-    # signal_palette = sns.color_palette("Blues", len(set(train_decays)))
-    # background_palette = sns.color_palette("Oranges", len(set(train_decays)))
 
     def plot_decays(decay_modes, labels, split_name, output_dir):
         decay_mode_counter_signal = Counter(
