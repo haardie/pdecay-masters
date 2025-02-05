@@ -1,0 +1,28 @@
+# basics
+numpy
+scipy
+pandas
+
+# ML
+torch
+torchvision
+efficientnet-pytorch
+h5py
+wandb
+scikit-learn
+optuna
+
+# image processing
+Pillow
+opencv-python
+scikit-image
+
+matplotlib
+seaborn
+
+# HEP
+uproot
+awkward
+
+# other
+weave
