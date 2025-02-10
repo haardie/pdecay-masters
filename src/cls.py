@@ -23,6 +23,7 @@ import logging
 from multiprocessing import Pool, cpu_count
 import time
 import itertools
+import pandas as pd
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,71 +58,50 @@ class ModifiedMobileNetV3(nn.Module):
     def forward(self, x):
         return self.model(x)
 
+
+
 class SparseMatrixDataset(Dataset):
-    def __init__(self, event_paths, plane_idx):
-        self.event_paths = event_paths
-        self.plane_idx = plane_idx
-        self.transform = transforms.Compose(
-            [transforms.Resize((500, 500)), transforms.ToTensor()]
-        )
+    def __init__(self, metadata_csv, plane_idx, transform=None):
+ 
+        df = pd.read_csv(metadata_csv)
 
-        print("[INFO] Initializing dataset...")
-        start_time = time.time()
+        self.file_paths  = df[f"file_path_plane{plane_idx}"].tolist()
+        self.labels      = df["label"].tolist()   # e.g., 0 or 1
+        self.decay_labels = df["decay"].tolist()
 
-        collected_data = list(self._collect_sparse_matrices())
-        self.file_paths, self.labels = (
-            zip(*collected_data) if collected_data else ([], [])
-        )
-        self.decay_labels = [label[1] for label in self.labels]
+        self.transform = transform or transforms.Compose([
+            transforms.Resize((500, 500)),
+            transforms.ToTensor(),
+        ])
 
-        print(f"[INFO] Dataset initialized in {time.time() - start_time:.2f} seconds.")
-
-    def _collect_sparse_matrices(self):
-
-        for evt_path in self.event_paths:
-            plane_path = evt_path / f"plane{self.plane_idx}"
-            if plane_path.is_dir():
-                decay_mode = evt_path.parent.name
-
-                yield from (
-                    (str(f), (1 if "pdk_decays" in str(evt_path) else 0, decay_mode))
-                    for f in plane_path.iterdir()
-                    if f.suffix == ".npz"
-                )
+        print(f"[INFO] Loaded {len(self.file_paths)} entries from {metadata_csv}")
 
     def __len__(self):
         return len(self.file_paths)
 
     def __getitem__(self, idx):
+        file_path = self.file_paths[idx]
+        label     = self.labels[idx]
+        image = self.process_sparse_matrix(file_path)
 
-        if idx >= len(self.file_paths):
-            raise IndexError("Index out of range")
-
-        sparse_matrix_path = self.file_paths[idx]
-        label = self.labels[idx][0]
-
-        image = self.process_sparse_matrix(sparse_matrix_path)
         return image, label
 
-    def process_sparse_matrix(self, sparse_matrix_path):
-
+    def process_sparse_matrix(self, npz_path):
         try:
-            sparse_matrix = np.load(sparse_matrix_path)
-            sparse_matrix = csr_matrix(
-                (
-                    sparse_matrix["data"],
-                    sparse_matrix["indices"],
-                    sparse_matrix["indptr"],
-                ),
-                shape=sparse_matrix["shape"],
+            sparse_data = np.load(npz_path)
+            cmat = csr_matrix(
+                (sparse_data["data"], sparse_data["indices"], sparse_data["indptr"]),
+                shape=sparse_data["shape"]
             )
-            image = Image.fromarray(sparse_matrix.toarray().astype(np.uint8), mode="L")
-            image = self.transform(image)
+            image = Image.fromarray(cmat.toarray().astype(np.uint8), mode="L")
+
+            if self.transform:
+                image = self.transform(image)
+
         except Exception as e:
-            print(
-                f"[WARNING] Failed to load sparse matrix: {sparse_matrix_path}. Error: {e}"
-            )
+            print(f"[WARNING] Failed to load {npz_path}: {e}")
             image = torch.zeros((1, 500, 500))
+
         return image
 
 
