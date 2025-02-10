@@ -134,48 +134,50 @@ def extract_labels(dataset, indices):
     return [dataset[i][1] for i in indices]
 
 
-def strat_meta_split(dataset, labels, train_frac, val_frac, generator_seed):
+def strat_meta_split(dataset, train_frac, val_frac, generator_seed):
     logger.info("Starting stratified split")
-    
-    # Convert to NumPy arrays for faster indexing
-    class_labels = np.array(dataset.labels)
-    decays = np.array(dataset.decay_labels)
-    
-    # Create a combined stratification key using tuples (class, decay)
-    stratify_labels = np.array([f"{c}_{d}" for c, d in zip(class_labels, decays)])
 
-    # First split: train_val (95%) and test (5%)
+    decays = np.array(dataset.decay_labels)
+    unique_labels, counts = np.unique(decays, return_counts=True)
+
+    # Keep only labels appearing more than once
+    valid_labels = unique_labels[counts > 1]
+    valid_indices = np.array([i for i, d in enumerate(decays) if d in valid_labels])
+
+    filtered_dataset = Subset(dataset, valid_indices)
+    filtered_decays = decays[valid_indices]
+
+    print(f"Filtered stratify labels shape: {filtered_decays.shape}")
+
     train_val_indices, test_indices = train_test_split(
-        np.arange(len(class_labels)),
+        np.arange(len(filtered_decays)),  # Use filtered dataset length
         test_size=0.05,
-        stratify=stratify_labels,
-        random_state=generator_seed
+        stratify=filtered_decays,
+        random_state=generator_seed,
     )
-    
-    train_val_data = Subset(dataset, train_val_indices)
-    test_data = Subset(dataset, test_indices)
+
+    train_val_data = Subset(filtered_dataset, train_val_indices)
+    test_data = Subset(filtered_dataset, test_indices)
 
     logger.info(f"Initial train&val and test split completed")
     logger.info(f"Train&Val size: {len(train_val_data)}, Test size: {len(test_data)}")
 
-    # Second split: train (90% of train_val) and val (10% of train_val)
     train_indices, val_indices = train_test_split(
         train_val_indices,
         test_size=0.10,
-        stratify=stratify_labels[train_val_indices],
-        random_state=generator_seed
+        stratify=filtered_decays[train_val_indices],
+        random_state=generator_seed,
     )
 
-    train_data = Subset(dataset, train_indices)
-    val_data = Subset(dataset, val_indices)
+    train_data = Subset(filtered_dataset, train_indices)
+    val_data = Subset(filtered_dataset, val_indices)
 
     logger.info("Train and val split completed")
     logger.info(f"Train size: {len(train_data)}, Val size: {len(val_data)}")
 
-    # Count decay modes in train, val, test
-    train_counts = Counter(decays[train_indices])
-    val_counts = Counter(decays[val_indices])
-    test_counts = Counter(decays[test_indices])
+    train_counts = Counter(filtered_decays[train_indices])
+    val_counts = Counter(filtered_decays[val_indices])
+    test_counts = Counter(filtered_decays[test_indices])
 
     logger.info(f"Decay counts in Train: {train_counts}")
     logger.info(f"Decay counts in Val: {val_counts}")
@@ -432,8 +434,8 @@ def train_lfm(
             True,
         )
 
-        save_path = "/mnt/lustre/helios-home/gartmann/venv/checkpoints/late_fusion/late_fusion_{}.pt".format(
-            time.strftime("%d-%m_%H-%M")
+        save_path = "/mnt/lustre/helios-home/gartmann/venv/checkpoints/late_fusion/{}_{}.pt".format(
+            str(model), time.strftime("%d-%m_%H-%M")
         )
 
         torch.save(
@@ -446,9 +448,15 @@ def train_lfm(
 
         date_time = time.strftime("%d-%m_%H-%M")
 
-        df_train.to_csv(f"./diagnostics/metrics-df/lfm/df_train_{date_time}_lfm.csv")
-        df_val.to_csv(f"./diagnostics/metrics-df/lfm//df_val_{date_time}_lfm.csv")
-        df_test.to_csv(f"./diagnostics/metrics-df/lfm/df_test_{date_time}_lfm.csv")
+        df_train.to_csv(
+            f"./diagnostics/metrics-df/lfm/df_train_{date_time}_{str(model)}.csv"
+        )
+        df_val.to_csv(
+            f"./diagnostics/metrics-df/lfm//df_val_{date_time}_{str(model)}.csv"
+        )
+        df_test.to_csv(
+            f"./diagnostics/metrics-df/lfm/df_test_{date_time}_{str(model)}.csv"
+        )
 
     return (
         model,
@@ -472,6 +480,7 @@ def train_one_epoch(
     table,
     df,
     is_best_epoch,
+    seed,
 ):
     running_loss = 0.0
     correct = 0
@@ -520,7 +529,7 @@ def train_one_epoch(
     print(f"Epoch time: {(epoch_end - epoch_start) / 60:.2f} minutes")
     print(f"Intermediate save at {epoch_idx}")
     # Save checkpoint
-    save_path = f"/mnt/lustre/helios-home/gartmann/venv/checkpoints_wt_avg/resnet18_{epoch_idx}_at{time.strftime('%d-%m_%H-%M')}.pt"
+    save_path = f"/mnt/lustre/helios-home/gartmann/venv/checkpoints/{str(model)}_{epoch_idx}_at{time.strftime('%d-%m_%H-%M')}_{seed}.pt"
     torch.save(
         {
             "model_state_dict": model.state_dict(),
@@ -584,7 +593,7 @@ def validate(model, val_loader, criterion, device, table, df, epoch_idx, is_best
 
 
 @weave.op()
-def test_model(model, plane, checkpoint_pth, test_loader, device, df, test_table):
+def test_model(model, plane, checkpoint_pth, test_loader, device, df, test_table, seed):
     temp_test_data = []
     all_responses = []
     all_labels = []
@@ -610,7 +619,7 @@ def test_model(model, plane, checkpoint_pth, test_loader, device, df, test_table
 
     date_time = time.strftime("%d-%m_%H-%M")
     df.to_csv(
-        f"./diagnostics/metrics-df/df_test_{date_time}_resnet18_h5_plane{plane}.csv"
+        f"./diagnostics/metrics-df/df_test_{date_time}_{str(model)}_plane{plane}_.csv"
     )
 
 
@@ -631,6 +640,7 @@ def train_model(
     df_val,
     plane,
     seed,
+    dset_seed,
 ):
     train_loss_values = []
     val_loss_values = []
@@ -660,6 +670,7 @@ def train_model(
             table,
             df_train,
             is_current_best,
+            seed,
         )
         # [Rest of the training code]
         train_loss_values.append(train_loss)
@@ -716,8 +727,10 @@ def train_model(
         )
 
     # Save checkpoint
-    save_path = "/mnt/lustre/helios-home/gartmann/venv/checkpoints_wt_avg/resnet18_{}_{}.pt".format(
-        seed, plane
+    save_path = (
+        "/mnt/lustre/helios-home/gartmann/venv/checkpoints/{}_{}_{}_dset_{}.pt".format(
+            str(model), seed, plane, dset_seed
+        )
     )
 
     torch.save(
@@ -735,10 +748,10 @@ def train_model(
     wandb.log({f"val_table_{date_time}": val_table})
 
     df_train.to_csv(
-        f"./diagnostics/metrics-df/df_train_{date_time}_resnet18_h5_plane{plane}.csv"
+        f"./diagnostics/metrics-df/df_train_{date_time}_{str(model)}_plane{plane}_{seed}.csv"
     )
     df_val.to_csv(
-        f"./diagnostics/metrics-df/df_val_{date_time}_resnet18_h5_plane{plane}.csv"
+        f"./diagnostics/metrics-df/df_val_{date_time}_{str(model)}_plane{plane}_{seed}.csv"
     )
 
     return (
